@@ -1098,6 +1098,7 @@ static void krb5_auth_done(struct tevent_req *subreq)
 
     case ERR_ACCOUNT_LOCKED:
         state->pam_status = PAM_PERM_DENIED;
+        pd->account_locked = true;
         ret = EOK;
         goto done;
 
