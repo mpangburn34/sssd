@@ -1419,3 +1419,54 @@ def test_authentication__pam_sss_domains_skips_non_matching_krb5_domains(
         assert (
             f"krbtgt/{realm}@{realm}" in result.stdout
         ), f"TGT should come from the {domain} realm ({realm}) when authenticating with that realm's password!"
+
+
+@pytest.mark.importance("medium")
+@pytest.mark.ticket(gh=5219)
+@pytest.mark.topology(KnownTopologyGroup.AnyDC)
+@pytest.mark.preferred_topology(KnownTopology.IPA)
+def test_authentication__locked_account_shows_configured_message(client: Client, provider: GenericProvider):
+    """
+    :title: Account locked out by the KDC shows pam_account_locked_message
+    :description:
+        The KDC answers with KRB5KDC_ERR_CLIENT_REVOKED once the password
+        policy locks a principal out. Without the lockout being reported to
+        the PAM responder the user only gets a bare "Permission denied", so
+        the administrator has no way to explain the denial. Setting
+        pam_account_locked_message must display that text instead.
+    :setup:
+        1. Create user
+        2. Set the password policy to lock the account after two failed attempts
+        3. Set pam_account_locked_message
+        4. Start SSSD
+    :steps:
+        1. Authenticate with the correct password
+        2. Authenticate twice with a wrong password to reach the lockout threshold
+        3. Authenticate with the correct password over su and read the output
+    :expectedresults:
+        1. Login succeeds, the account is not locked yet
+        2. Both attempts fail
+        3. Login fails and the configured message is shown to the user
+    :customerscenario: True
+    """
+    message = "Account locked, please contact the help desk."
+
+    provider.user("user1").add(password="Secret123")
+    # The lockout must outlive the test. AD requires the lockout duration to be
+    # at least as long as the observation window, which defaults to 30 minutes.
+    provider.password_policy.lockout(duration=1800, attempts=2)
+
+    client.sssd.pam["pam_account_locked_message"] = message
+    client.sssd.start()
+
+    assert client.auth.ssh.password("user1", "Secret123"), "Login before the lockout should succeed"
+
+    for i in range(2):
+        assert not client.auth.ssh.password("user1", "wrongpassword"), f"Wrong password attempt {i + 1} should fail"
+
+    # The message travels as SSS_PAM_USER_INFO and pam_sss turns it into a PAM_TEXT_INFO
+    # conversation message. sshd does not relay those to the client during password
+    # authentication, so su is used to read it.
+    rc, _, stdout, _ = client.auth.su.password_with_output("user1", "Secret123")
+    assert rc != 0, "Login should be denied while the account is locked"
+    assert message in stdout, f"Lockout message was not shown to the user, got: {stdout}"
